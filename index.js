@@ -46,9 +46,95 @@ const blogCollection = client.db("blogDB").collection("blogs");
 const categoryCollection = client.db("categoryDB").collection("categories");
 const userCollection = client.db("userDB").collection("user");
 
+//Own MiddleWare
+//Verify Token
+
+const verifyToken = (req, res, next) => {
+  if (!req.headers.authorization) {
+    return res.status(401).send({ message: "Forbidden Access" });
+  }
+  const token = req.headers.authorization.split(" ")[1];
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ message: "Forbidden Access" });
+    }
+    req.decoded = decoded;
+    next();
+  });
+};
+// use verify admin after verifyToken
+const verifyAdmin = async (req, res, next) => {
+  const email = req.decoded.email;
+  const query = { email: email };
+  const user = await userCollection.findOne(query);
+  const isAdmin = user?.role === "admin";
+  if (!isAdmin) {
+    return res.status(403).send({ message: "forbidden access" });
+  }
+  next();
+};
+//Get admin
+app.get("/users/admin/:email", verifyToken, async (req, res) => {
+  const email = req.params.email;
+
+  if (email !== req.decoded.email) {
+    return res.status(403).send({ message: "forbidden access" });
+  }
+
+  const query = { email: email };
+  const user = await userCollection.findOne(query);
+  let admin = false;
+  if (user) {
+    admin = user?.role === "admin";
+  }
+  res.send({ admin });
+});
+
+//Make Admin
+app.patch("/users/admin/:id", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const filter = { _id: new ObjectId(id) };
+
+    // Fetch the current document to check the current status
+    const currentDoc = await userCollection.findOne(filter);
+
+    if (!currentDoc) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Determine the new status based on the current status
+    const newRole = currentDoc.role === "member" ? "admin" : "member";
+
+    const updatedDoc = {
+      $set: {
+        role: newRole,
+      },
+    };
+
+    const result = await userCollection.updateOne(filter, updatedDoc);
+
+    res.send(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+  // Get User Data 
+        app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                // const userEmail = req.query.email;
+                const result = await userCollection.find().toArray();
+                res.send(result);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send('Internal Server Error');
+            }
+        });
+
 // REGISTER
 app.post("/api/register", async (req, res) => {
-  const { name, email, password, photo } = req.body;
+  const { name, email, password, photo, role } = req.body;
 
   try {
     const existingUser = await userCollection.findOne({ email });
@@ -57,19 +143,25 @@ app.post("/api/register", async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = {
-      name,
-      email,
-      password: hashedPassword,
-      photo,
-    };
+    const newUser = { name, email, password: hashedPassword, photo, role };
 
     const result = await userCollection.insertOne(newUser);
+
+    const token = jwt.sign(
+      { id: result.insertedId, email },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "7d",
+      }
+    );
+
     res.status(201).json({
       message: "User registered successfully",
       userId: result.insertedId,
+      token,
     });
   } catch (err) {
+    console.error("Registration error:", err);
     res.status(500).json({ error: "Registration failed" });
   }
 });
@@ -85,23 +177,72 @@ app.post("/api/login", async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
-    });
+    // ✅ Include full user info in the token
+    const token = jwt.sign(
+      {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        photo: user.photo,
+      },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "7d",
+      }
+    );
 
     res.json({
       message: "Login successful",
       token,
-      user: { name: user.name, email: user.email },
     });
   } catch (err) {
     res.status(500).json({ error: "Login failed" });
   }
 });
 
-// Root endpoint
-app.get("/", (req, res) => {
-  res.send("🚀 Server is Running....");
+// Update profile
+app.put("/api/update-profile", async (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const { name, photo } = req.body;
+
+    const result = await userCollection.updateOne(
+      { _id: new ObjectId(decoded.id) },
+      { $set: { name, photo } }
+    );
+
+    res.json({ message: "Profile updated" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
+// Get user data
+app.get("/api/user", async (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1]; // Extract the token from the Authorization header
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    // Decode the token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Fetch user from the database using the user ID from the decoded token
+    const user = await userCollection.findOne({
+      _id: new ObjectId(decoded.id),
+    });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Send the user data back in the response
+    res.status(200).json({ user });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error fetching user data" });
+  }
 });
 
 // Add Music endpoint
