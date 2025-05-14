@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const { MongoClient, ServerApiVersion } = require("mongodb");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
 
 const app = express();
 
@@ -42,7 +44,60 @@ const musicCollection = client.db("musicDB").collection("music");
 const bookCollection = client.db("bookDB").collection("books");
 const blogCollection = client.db("blogDB").collection("blogs");
 const categoryCollection = client.db("categoryDB").collection("categories");
+const userCollection = client.db("userDB").collection("user");
 
+// REGISTER
+app.post("/api/register", async (req, res) => {
+  const { name, email, password, photo } = req.body;
+
+  try {
+    const existingUser = await userCollection.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: "User already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = {
+      name,
+      email,
+      password: hashedPassword,
+      photo,
+    };
+
+    const result = await userCollection.insertOne(newUser);
+    res.status(201).json({
+      message: "User registered successfully",
+      userId: result.insertedId,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Registration failed" });
+  }
+});
+
+// LOGIN
+app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const user = await userCollection.findOne({ email });
+    if (!user) return res.status(400).json({ error: "User not found" });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    res.json({
+      message: "Login successful",
+      token,
+      user: { name: user.name, email: user.email },
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Login failed" });
+  }
+});
 
 // Root endpoint
 app.get("/", (req, res) => {
@@ -243,7 +298,7 @@ app.put("/update-book/:id", async (req, res) => {
 app.post("/add-blog", async (req, res) => {
   const { title, category, blog, tags } = req.body;
 
-  if (!title || !category || !blog|| !tags) {
+  if (!title || !category || !blog || !tags) {
     return res.status(400).json({ message: "All fields are required" });
   }
 
@@ -336,7 +391,9 @@ app.post("/add-category", async (req, res) => {
   const { section, category } = req.body;
 
   if (!section || !category) {
-    return res.status(400).json({ message: "Section and category are required" });
+    return res
+      .status(400)
+      .json({ message: "Section and category are required" });
   }
 
   const newCategory = {
@@ -370,12 +427,14 @@ app.get("/categories/:section", async (req, res) => {
   }
 });
 
-// Delete category 
+// Delete category
 app.delete("/delete-category/:id", async (req, res) => {
   const id = req.params.id;
 
   try {
-    const result = await categoryCollection.deleteOne({ _id: new ObjectId(id) });
+    const result = await categoryCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
 
     if (result.deletedCount === 1) {
       res.status(200).json({ message: "Category deleted successfully" });
@@ -387,7 +446,6 @@ app.delete("/delete-category/:id", async (req, res) => {
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
-
 
 // Start server
 app.listen(port, () => {
